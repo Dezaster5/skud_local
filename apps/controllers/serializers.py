@@ -16,12 +16,26 @@ class ControllerSerializer(serializers.ModelSerializer):
             "status",
             "ip_address",
             "firmware_version",
+            "connection_firmware_version",
+            "active_state",
+            "mode_state",
+            "last_auth_hash",
             "description",
             "last_seen_at",
             "created_at",
             "updated_at",
         )
-        read_only_fields = ("id", "created_at", "updated_at", "last_seen_at")
+        read_only_fields = (
+            "id",
+            "created_at",
+            "updated_at",
+            "last_seen_at",
+            "firmware_version",
+            "connection_firmware_version",
+            "active_state",
+            "mode_state",
+            "last_auth_hash",
+        )
 
     def validate_serial_number(self, value: str) -> str:
         normalized_serial_number = value.strip().upper()
@@ -80,6 +94,16 @@ class ManualOpenDoorTaskSerializer(serializers.Serializer):
         if access_point is not None and access_point.controller_id != controller.id:
             raise serializers.ValidationError("The selected access point does not belong to this controller.")
         return attrs
+
+
+class SetDoorParamsTaskSerializer(serializers.Serializer):
+    open = serializers.IntegerField(min_value=0, max_value=255)
+    open_control = serializers.IntegerField(min_value=0, max_value=255)
+    close_control = serializers.IntegerField(min_value=0, max_value=255)
+
+
+class ReadCardsTaskSerializer(serializers.Serializer):
+    pass
 
 
 class SyncWristbandsTaskSerializer(serializers.Serializer):

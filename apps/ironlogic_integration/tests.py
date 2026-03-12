@@ -7,7 +7,6 @@ from django.urls import reverse
 from django.utils import timezone
 from rest_framework.test import APITestCase
 
-from apps.access.models import AccessPolicy
 from apps.controllers.models import ControllerTask
 from apps.controllers.services import ControllerTaskService
 from apps.core.testing import (
@@ -27,6 +26,7 @@ from apps.wristbands.models import Wristband
 @override_settings(
     IRONLOGIC_ALLOWED_IPS=[],
     IRONLOGIC_WEBJSON_SHARED_TOKEN="",
+    IRONLOGIC_RESPONSE_INTERVAL_SECONDS=10,
     IRONLOGIC_TASK_BATCH_SIZE=20,
     IRONLOGIC_TASK_BATCH_MAX_BYTES=16384,
 )
@@ -55,6 +55,13 @@ class IronLogicWebJsonAPITests(APITestCase):
             "credential": {
                 "uid": uid,
             },
+        }
+
+    def _documented_envelope(self, *messages: dict, sn: str | int | None = None) -> dict:
+        return {
+            "type": "Z5-R WEB BT",
+            "sn": sn if sn is not None else self.controller.serial_number,
+            "messages": list(messages),
         }
 
     def test_check_access_granted(self) -> None:
@@ -162,6 +169,195 @@ class IronLogicWebJsonAPITests(APITestCase):
         self.assertEqual(payload["commands"][0]["task_id"], task.id)
         self.assertEqual(task.status, ControllerTask.Status.SENT)
 
+    def test_power_on_from_real_z5r_message_envelope_is_supported(self) -> None:
+        numeric_controller = create_controller(serial_number="45004196", firmware_version="")
+
+        status_code, payload = self._post(
+            {
+                "type": "Z5-R WEB BT",
+                "sn": 45004196,
+                "messages": [
+                    {
+                        "id": 1085377743,
+                        "operation": "power_on",
+                        "fw": "2.38",
+                        "conn_fw": "1.27",
+                        "active": 0,
+                        "mode": 0,
+                        "controller_ip": "172.18.12.18",
+                        "auth_hash": "10a7f003de5b386618614f34922cdc24",
+                    }
+                ],
+            }
+        )
+
+        numeric_controller.refresh_from_db()
+        log_entry = WebJsonRequestLog.objects.get()
+
+        self.assertEqual(status_code, 200)
+        self.assertEqual(payload["interval"], 10)
+        self.assertEqual(
+            payload["messages"],
+            [
+                {
+                    "id": 1085377743,
+                    "operation": "set_active",
+                    "active": 1,
+                    "online": 1,
+                }
+            ],
+        )
+        self.assertIn("date", payload)
+        self.assertEqual(log_entry.operation, "power_on")
+        self.assertEqual(log_entry.controller_id, numeric_controller.id)
+        self.assertEqual(numeric_controller.firmware_version, "2.38")
+        self.assertEqual(numeric_controller.connection_firmware_version, "1.27")
+        self.assertEqual(numeric_controller.ip_address, "172.18.12.18")
+        self.assertEqual(numeric_controller.active_state, 0)
+        self.assertEqual(numeric_controller.mode_state, 0)
+        self.assertEqual(numeric_controller.last_auth_hash, "10a7f003de5b386618614f34922cdc24")
+
+    def test_power_on_does_not_append_pending_commands_before_activation(self) -> None:
+        numeric_controller = create_controller(serial_number="45004196", firmware_version="")
+        task_service = ControllerTaskService()
+        task_service.enqueue_manual_open(controller=numeric_controller, duration_seconds=3)
+
+        status_code, payload = self._post(
+            {
+                "type": "Z5-R WEB BT",
+                "sn": 45004196,
+                "messages": [
+                    {
+                        "id": 1085377744,
+                        "operation": "power_on",
+                        "fw": "2.38",
+                        "conn_fw": "1.27",
+                        "active": 0,
+                        "mode": 0,
+                        "controller_ip": "172.18.12.18",
+                    }
+                ],
+            }
+        )
+
+        self.assertEqual(status_code, 200)
+        self.assertEqual(len(payload["messages"]), 1)
+        self.assertEqual(payload["messages"][0]["operation"], "set_active")
+
+    def test_check_access_from_real_message_envelope_returns_documented_response(self) -> None:
+        person = create_person()
+        wristband = create_wristband(person=person, uid="04DOCALLOW1")
+        create_access_policy(person=person, access_point=self.access_point)
+
+        status_code, payload = self._post(
+            self._documented_envelope(
+                {
+                    "id": 1001,
+                    "operation": "check_access",
+                    "card": wristband.uid,
+                    "reader": 1,
+                }
+            )
+        )
+
+        self.assertEqual(status_code, 200)
+        self.assertEqual(payload["interval"], 10)
+        self.assertEqual(
+            payload["messages"][0],
+            {
+                "id": 1001,
+                "operation": "check_access",
+                "granted": 1,
+            },
+        )
+
+    def test_unknown_card_from_real_message_envelope_is_logged_as_denied_event(self) -> None:
+        status_code, payload = self._post(
+            self._documented_envelope(
+                {
+                    "id": 1002,
+                    "operation": "check_access",
+                    "card": "04UNKNOWNAA01",
+                    "reader": 1,
+                }
+            )
+        )
+
+        denied_event = AccessEvent.objects.get(event_type=AccessEvent.EventType.ACCESS_DENIED)
+        self.assertEqual(status_code, 200)
+        self.assertEqual(payload["messages"][0]["granted"], 0)
+        self.assertEqual(denied_event.credential_uid, "04UNKNOWNAA01")
+        self.assertEqual(denied_event.reason_code, "wristband_not_found")
+
+    def test_ping_from_real_message_envelope_returns_documented_commands(self) -> None:
+        task_service = ControllerTaskService()
+        task = task_service.enqueue_manual_open(
+            controller=self.controller,
+            access_point=self.access_point,
+            duration_seconds=3,
+        )
+
+        status_code, payload = self._post(
+            self._documented_envelope(
+                {
+                    "id": 2001,
+                    "operation": "ping",
+                    "active": 1,
+                    "mode": 0,
+                }
+            )
+        )
+
+        task.refresh_from_db()
+        self.assertEqual(status_code, 200)
+        self.assertEqual(
+            payload["messages"],
+            [
+                {
+                    "id": task.id,
+                    "operation": "open_door",
+                    "direction": 0,
+                }
+            ],
+        )
+        self.assertEqual(task.status, ControllerTask.Status.SENT)
+
+    def test_ping_returns_set_door_params_command_in_documented_format(self) -> None:
+        task_service = ControllerTaskService()
+        task = task_service.enqueue_set_door_params(
+            controller=self.controller,
+            open_time=10,
+            open_control_time=20,
+            close_control_time=30,
+        )
+
+        status_code, payload = self._post(
+            self._documented_envelope(
+                {
+                    "id": 2002,
+                    "operation": "ping",
+                    "active": 1,
+                    "mode": 0,
+                }
+            )
+        )
+
+        task.refresh_from_db()
+        self.assertEqual(status_code, 200)
+        self.assertEqual(
+            payload["messages"],
+            [
+                {
+                    "id": task.id,
+                    "operation": "set_door_params",
+                    "open": 10,
+                    "open_control": 20,
+                    "close_control": 30,
+                }
+            ],
+        )
+        self.assertEqual(task.status, ControllerTask.Status.SENT)
+
     def test_ping_processes_task_acknowledgements(self) -> None:
         task_service = ControllerTaskService()
         done_task = task_service.enqueue_manual_open(controller=self.controller, duration_seconds=3)
@@ -197,6 +393,52 @@ class IronLogicWebJsonAPITests(APITestCase):
         self.assertEqual(failed_task.status, ControllerTask.Status.FAILED)
         self.assertEqual(failed_task.error_message, "memory full")
 
+    def test_command_success_message_from_real_envelope_marks_task_done(self) -> None:
+        task_service = ControllerTaskService()
+        task = task_service.enqueue_manual_open(controller=self.controller, duration_seconds=3)
+        task_service.mark_tasks_as_sent([task])
+
+        status_code, payload = self._post(
+            self._documented_envelope(
+                {
+                    "id": task.id,
+                    "success": 1,
+                }
+            )
+        )
+
+        task.refresh_from_db()
+        self.assertEqual(status_code, 200)
+        self.assertEqual(payload["messages"], [])
+        self.assertEqual(task.status, ControllerTask.Status.DONE)
+
+    def test_read_cards_result_from_real_envelope_marks_task_done_and_logs_payload(self) -> None:
+        task_service = ControllerTaskService()
+        task = task_service.enqueue_read_cards(controller=self.controller)
+        task_service.mark_tasks_as_sent([task])
+
+        status_code, payload = self._post(
+            self._documented_envelope(
+                {
+                    "id": task.id,
+                    "cards": [
+                        {
+                            "card": "04AABBCCDD",
+                            "flags": 0,
+                            "tz": 255,
+                        }
+                    ],
+                }
+            )
+        )
+
+        task.refresh_from_db()
+        read_cards_event = AccessEvent.objects.get(reason_code="read_cards_result")
+        self.assertEqual(status_code, 200)
+        self.assertEqual(payload["messages"], [])
+        self.assertEqual(task.status, ControllerTask.Status.DONE)
+        self.assertEqual(read_cards_event.raw_payload["cards"][0]["card"], "04AABBCCDD")
+
     def test_events_operation_saves_event(self) -> None:
         status_code, payload = self._post(
             {
@@ -223,6 +465,38 @@ class IronLogicWebJsonAPITests(APITestCase):
         self.assertEqual(AccessEvent.objects.filter(event_type=AccessEvent.EventType.CONTROLLER_EVENT).count(), 1)
         self.assertEqual(AccessEvent.objects.get().credential_uid, "04EVENT0001")
 
+    def test_events_from_real_message_envelope_returns_events_success(self) -> None:
+        status_code, payload = self._post(
+            self._documented_envelope(
+                {
+                    "id": 3001,
+                    "operation": "events",
+                    "events": [
+                        {
+                            "event": 4,
+                            "card": "04EVENTDOC1",
+                            "time": "2026-03-12 12:34:56",
+                            "flag": 0,
+                            "reader": 1,
+                        }
+                    ],
+                    "last_event": 3160,
+                }
+            )
+        )
+
+        self.assertEqual(status_code, 200)
+        self.assertEqual(
+            payload["messages"][0],
+            {
+                "id": 3001,
+                "operation": "events",
+                "events_success": 1,
+            },
+        )
+        self.assertEqual(AccessEvent.objects.filter(event_type=AccessEvent.EventType.CONTROLLER_EVENT).count(), 1)
+        self.assertEqual(AccessEvent.objects.get().credential_uid, "04EVENTDOC1")
+
     def test_unknown_operation_does_not_crash_endpoint(self) -> None:
         status_code, payload = self._post(
             {
@@ -238,3 +512,19 @@ class IronLogicWebJsonAPITests(APITestCase):
         self.assertEqual(payload["status"], "error")
         self.assertEqual(payload["error"]["code"], "unknown_operation")
         self.assertEqual(WebJsonRequestLog.objects.count(), 1)
+
+    def test_unknown_operation_in_real_envelope_returns_protocol_error_message(self) -> None:
+        status_code, payload = self._post(
+            self._documented_envelope(
+                {
+                    "id": 4001,
+                    "operation": "reboot_now",
+                }
+            )
+        )
+
+        self.assertEqual(status_code, 200)
+        self.assertEqual(payload["messages"][0]["id"], 4001)
+        self.assertEqual(payload["messages"][0]["operation"], "reboot_now")
+        self.assertEqual(payload["messages"][0]["success"], 0)
+        self.assertEqual(payload["messages"][0]["error"]["code"], "unknown_operation")

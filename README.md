@@ -11,6 +11,7 @@ The repository also contains `Example_in_basic_python/` with plain Python refere
 - exposes internal REST API for operators and administrators
 - accepts HTTP POST callbacks from IronLogic-compatible Web-JSON controllers
 - returns access decisions and pending controller commands in the same response
+  using the documented controller envelope `{"date","interval","messages":[...]}` for real Z5R Web BT requests
 - keeps a controller task queue for offline fallback and synchronization scenarios
 
 ## Stack
@@ -153,6 +154,7 @@ IronLogic integration:
 - `IRONLOGIC_WEBJSON_SHARED_TOKEN`
 - `IRONLOGIC_ALLOWED_IPS`
 - `IRONLOGIC_TRUST_X_FORWARDED_FOR`
+- `IRONLOGIC_RESPONSE_INTERVAL_SECONDS`
 - `IRONLOGIC_TASK_BATCH_SIZE`
 - `IRONLOGIC_TASK_BATCH_MAX_BYTES`
 - `IRONLOGIC_TASK_SENT_RETRY_SECONDS`
@@ -255,6 +257,8 @@ Special actions:
 - `POST /api/wristbands/{id}/block/`
 - `POST /api/wristbands/{id}/unblock/`
 - `POST /api/controllers/{id}/open-door/`
+- `POST /api/controllers/{id}/read-cards/`
+- `POST /api/controllers/{id}/set-door-params/`
 - `POST /api/controllers/{id}/sync-wristbands/`
 
 Example `curl`:
@@ -285,6 +289,20 @@ curl -u admin:password \
   http://localhost:8000/api/controllers/1/open-door/
 ```
 
+```bash
+curl -u admin:password \
+  -H "Content-Type: application/json" \
+  -d '{}' \
+  http://localhost:8000/api/controllers/1/read-cards/
+```
+
+```bash
+curl -u admin:password \
+  -H "Content-Type: application/json" \
+  -d '{"open":10,"open_control":10,"close_control":10}' \
+  http://localhost:8000/api/controllers/1/set-door-params/
+```
+
 Example `httpie`:
 
 ```bash
@@ -310,24 +328,30 @@ Supported operations:
 
 Current response capabilities:
 
-- access decision payload
-- pending controller commands
+- documented controller envelope with `date`, `interval`, and `messages`
+- automatic `set_active` response on `power_on` while the controller is still inactive
+- access decision payload for `check_access`
+- `events_success` acknowledgement for `events`
+- pending controller commands mapped to documented operations like `open_door`, `set_door_params`, `add_cards`, `del_cards`, `clear_cards`, `read_cards`
 - task acknowledgement processing
+- `read_cards` result logging into controller events for reconciliation/debugging
+- controller runtime state refresh from device fields like `fw`, `conn_fw`, `active`, `mode`, `controller_ip`, `auth_hash`
 - raw request/response logging in `WebJsonRequestLog`
 
-Example `check_access` request:
+Documented request envelope example:
 
 ```json
 {
-  "request_id": "acc-1001",
-  "operation": "check_access",
-  "controller": {
-    "serial_number": "DEMO-Z5R-001",
-    "access_point_code": "main-entry"
-  },
-  "credential": {
-    "uid": "04DEMO000001"
-  }
+  "type": "Z5-R WEB BT",
+  "sn": "DEMO-Z5R-001",
+  "messages": [
+    {
+      "id": 1001,
+      "operation": "check_access",
+      "card": "04DEMO000001",
+      "reader": 1
+    }
+  ]
 }
 ```
 
@@ -335,7 +359,7 @@ Example `curl`:
 
 ```bash
 curl -H "Content-Type: application/json" \
-  -d '{"request_id":"acc-1001","operation":"check_access","controller":{"serial_number":"DEMO-Z5R-001","access_point_code":"main-entry"},"credential":{"uid":"04DEMO000001"}}' \
+  -d '{"type":"Z5-R WEB BT","sn":"DEMO-Z5R-001","messages":[{"id":1001,"operation":"check_access","card":"04DEMO000001","reader":1}]}' \
   http://localhost:8000/api/ironlogic/webjson/
 ```
 
@@ -343,28 +367,31 @@ Example `httpie`:
 
 ```bash
 http POST :8000/api/ironlogic/webjson/ \
-  request_id=ping-1 \
-  operation=ping \
-  controller:='{"serial_number":"DEMO-Z5R-001"}'
+  type='Z5-R WEB BT' \
+  sn='DEMO-Z5R-001' \
+  messages:='[{"id":2001,"operation":"ping","active":1,"mode":0}]'
 ```
 
 Example `events` request:
 
 ```json
 {
-  "request_id": "evt-1",
-  "operation": "events",
-  "controller": {
-    "serial_number": "DEMO-Z5R-001"
-  },
-  "events": [
+  "type": "Z5-R WEB BT",
+  "sn": "DEMO-Z5R-001",
+  "messages": [
     {
-      "timestamp": "2026-03-11T10:00:00+05:00",
-      "uid": "04DEMO000001",
-      "direction": "entry",
-      "reason_code": "turnstile_passed",
-      "message": "Pass completed",
-      "point": "main-entry"
+      "id": 3001,
+      "operation": "events",
+      "events": [
+        {
+          "event": 4,
+          "card": "04DEMO000001",
+          "time": "2026-03-11 10:00:00",
+          "flag": 0,
+          "reader": 1
+        }
+      ],
+      "last_event": 3160
     }
   ]
 }
@@ -379,14 +406,18 @@ Example `events` request:
 
 - offline fallback is only partially implemented on the backend side; real autonomous controller behavior depends on confirmed device protocol semantics
 - tasks are marked `sent` when included in an HTTP response; without hardware acknowledgement there is still a retry/deduplication risk
+- new or unknown card UIDs are denied by policy evaluation and logged in `AccessEvent` with `credential_uid` and `reason_code`, but they are not auto-enrolled into `Wristband`
 - time rules support weekly windows and overnight intervals, but not holiday calendars or exception dates
 - the integration layer assumes canonical uppercase UIDs and uppercase controller serial numbers
 - the internal REST API is admin-oriented and expects a trusted local network segment
 
 ## Hardware assumptions
 
-- ASSUMPTION: controller callbacks can be normalized around `operation`, `controller.serial_number`, `credential.uid`, `events[]`
-- ASSUMPTION: task acknowledgements may come in fields like `task_results`, `completed_task_ids`, `failed_tasks`
+- ASSUMPTION: real Z5R Web BT callbacks arrive in the documented envelope `{"type","sn","messages":[...]}` with per-message fields like `id`, `operation`, `card`, `reader`, `events`, `success`
+- ASSUMPTION: legacy flat payloads are still supported for compatibility with tests and manual debugging, but real hardware integration should prefer the documented `messages[]` envelope
+- ASSUMPTION: task acknowledgements may come either in documented per-message forms like `{"id":123,"success":1}` or in pragmatic compatibility fields like `task_results`, `completed_task_ids`, `failed_tasks`
+- ASSUMPTION: `power_on` and `ping` are handled as command-poll notifications and therefore receive a commands-only response envelope unless there are explicit business results to return, like `check_access` or `events_success`
+- Design note: when Z5R reports `power_on` with `active=0`, the server proactively returns `set_active(active=1, online=1)` so the controller can leave bootstrap mode and stop repeating `power_on`
 - ASSUMPTION: one controller can expose one or more access points identified by `access_point_code` or `device_port`
 - ASSUMPTION: the controller accepts command batching in a single JSON response and can map device terminology like `cards` to the domain `wristbands`
 

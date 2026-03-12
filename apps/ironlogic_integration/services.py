@@ -19,10 +19,23 @@ from apps.ironlogic_integration.adapters import (
     IncomingControllerEvent,
     TaskAcknowledgement,
     WebJsonAdapter,
-    WebJsonCommand,
+    WebJsonEnvelope,
+    WebJsonMessage,
 )
 from apps.ironlogic_integration.models import WebJsonRequestLog
-from apps.ironlogic_integration.response_builders import build_error_response, build_success_response
+from apps.ironlogic_integration.response_builders import (
+    build_error_response,
+    build_protocol_check_access_message,
+    build_protocol_controller_messages,
+    build_protocol_envelope_response,
+    build_protocol_error_message,
+    build_protocol_events_message,
+    build_protocol_set_active_message,
+    build_success_response,
+)
+
+
+SUPPORTED_REQUEST_OPERATIONS = {"power_on", "ping", "check_access", "events"}
 
 
 @dataclass(slots=True, frozen=True)
@@ -81,27 +94,26 @@ class IronLogicWebJsonService:
             )
             return WebJsonResponse(payload=response_payload, http_status=400)
 
-        command = self.adapter.parse(payload)
-        controller = self._resolve_controller(command)
+        envelope = self.adapter.parse(payload)
+        controller = self._resolve_controller(envelope)
         request_log = self._create_request_log(
             controller=controller,
-            request_id=command.request_id or "",
-            operation=command.operation,
+            request_id=self._extract_request_id(envelope),
+            operation=self._summarize_operations(envelope),
             source_ip=source_ip,
             processing_status=WebJsonRequestLog.ProcessingStatus.PROCESSED,
             http_status=200,
-            token_present=bool(self._extract_auth_token(headers=headers, command=command)),
+            token_present=bool(self._extract_auth_token(headers=headers, envelope=envelope)),
             request_body=raw_body,
             request_payload=payload,
             response_payload={},
             error_message="",
         )
 
-        security_error = self._validate_security(headers=headers, source_ip=source_ip, command=command)
+        security_error = self._validate_security(headers=headers, source_ip=source_ip, envelope=envelope)
         if security_error is not None:
-            response_payload = build_error_response(
-                operation=command.operation or "unknown",
-                request_id=command.request_id,
+            response_payload = self._build_error_payload(
+                envelope=envelope,
                 error_code="unauthorized",
                 error_message=security_error,
             )
@@ -114,26 +126,9 @@ class IronLogicWebJsonService:
             )
             return WebJsonResponse(payload=response_payload, http_status=403)
 
-        if command.operation not in {"power_on", "ping", "check_access", "events"}:
-            response_payload = build_error_response(
-                operation=command.operation or "unknown",
-                request_id=command.request_id,
-                error_code="unknown_operation",
-                error_message="Operation is not supported by this endpoint.",
-            )
-            self._finalize_request_log(
-                request_log=request_log,
-                processing_status=WebJsonRequestLog.ProcessingStatus.UNKNOWN_OPERATION,
-                http_status=200,
-                response_payload=response_payload,
-                error_message="Operation is not supported by this endpoint.",
-            )
-            return WebJsonResponse(payload=response_payload, http_status=200)
-
         if controller is None:
-            response_payload = build_error_response(
-                operation=command.operation,
-                request_id=command.request_id,
+            response_payload = self._build_error_payload(
+                envelope=envelope,
                 error_code="controller_not_found",
                 error_message="Controller was not found by serial number.",
             )
@@ -146,11 +141,32 @@ class IronLogicWebJsonService:
             )
             return WebJsonResponse(payload=response_payload, http_status=200)
 
-        self._process_task_acknowledgements(controller=controller, command=command)
+        self._process_task_acknowledgements(
+            controller=controller,
+            acknowledgements=envelope.task_acknowledgements,
+        )
+
         if controller.status == Controller.Status.DISABLED:
-            response_payload = build_error_response(
-                operation=command.operation,
-                request_id=command.request_id,
+            if envelope.uses_message_envelope and self._contains_power_on_request(envelope):
+                response_payload = build_protocol_envelope_response(
+                    messages=self._build_power_on_activation_messages(
+                        envelope=envelope,
+                        active=False,
+                        online=False,
+                    ),
+                    interval_seconds=settings.IRONLOGIC_RESPONSE_INTERVAL_SECONDS,
+                )
+                self._finalize_request_log(
+                    request_log=request_log,
+                    processing_status=WebJsonRequestLog.ProcessingStatus.CONTROLLER_INACTIVE,
+                    http_status=200,
+                    response_payload=response_payload,
+                    error_message="Controller is disabled.",
+                )
+                return WebJsonResponse(payload=response_payload, http_status=200)
+
+            response_payload = self._build_error_payload(
+                envelope=envelope,
                 error_code="controller_disabled",
                 error_message="Controller is disabled.",
             )
@@ -163,9 +179,12 @@ class IronLogicWebJsonService:
             )
             return WebJsonResponse(payload=response_payload, http_status=200)
 
-        self._mark_controller_seen(controller)
-        response = self._dispatch(command=command, controller=controller)
-        processing_status = self._select_processing_status(command=command, response_payload=response.payload)
+        self._update_controller_runtime_state(controller=controller, envelope=envelope)
+        response = self._dispatch(envelope=envelope, controller=controller)
+        processing_status = self._select_processing_status(
+            envelope=envelope,
+            response_payload=response.payload,
+        )
         error_message = self._extract_error_message(response.payload)
         self._finalize_request_log(
             request_log=request_log,
@@ -176,142 +195,292 @@ class IronLogicWebJsonService:
         )
         return response
 
-    def _dispatch(self, *, command: WebJsonCommand, controller: Controller) -> WebJsonResponse:
-        if command.operation == "power_on":
-            self.event_logging_service.log_controller_event(
-                controller=controller,
-                message="Controller power_on received.",
-                reason_code="power_on",
-                raw_payload=command.raw_payload,
+    def _dispatch(self, *, envelope: WebJsonEnvelope, controller: Controller) -> WebJsonResponse:
+        if envelope.uses_message_envelope:
+            response_messages: list[dict[str, Any]] = []
+            suppress_pending_commands = False
+            for message in envelope.messages:
+                message_responses, message_suppresses_pending = self._dispatch_documented_message(
+                    message=message,
+                    controller=controller,
+                )
+                response_messages.extend(message_responses)
+                suppress_pending_commands = suppress_pending_commands or message_suppresses_pending
+
+            if not suppress_pending_commands:
+                response_messages.extend(self._build_pending_protocol_messages(controller))
+            return WebJsonResponse(
+                payload=build_protocol_envelope_response(
+                    messages=response_messages,
+                    interval_seconds=settings.IRONLOGIC_RESPONSE_INTERVAL_SECONDS,
+                ),
+                http_status=200,
             )
+
+        legacy_message = envelope.messages[0] if envelope.messages else self._build_empty_message()
+        return self._dispatch_legacy_message(message=legacy_message, controller=controller)
+
+    def _dispatch_documented_message(
+        self,
+        *,
+        message: WebJsonMessage,
+        controller: Controller,
+    ) -> tuple[list[dict[str, Any]], bool]:
+        if not message.operation:
+            return [], False
+
+        if message.operation not in SUPPORTED_REQUEST_OPERATIONS:
+            return [
+                build_protocol_error_message(
+                    request_id=message.request_id,
+                    operation=message.operation,
+                    error_code="unknown_operation",
+                    error_message="Operation is not supported by this endpoint.",
+                )
+            ], False
+
+        if message.operation == "power_on":
+            self._handle_power_on(controller=controller, message=message)
+            activation_messages = self._build_power_on_activation_messages(
+                envelope=WebJsonEnvelope(
+                    controller_serial_number=controller.serial_number,
+                    controller_type=None,
+                    auth_token=None,
+                    messages=(message,),
+                    task_acknowledgements=(),
+                    raw_payload=message.raw_payload,
+                    uses_message_envelope=True,
+                ),
+                active=True,
+                online=settings.IRONLOGIC_ONLINE_ACCESS_ENABLED,
+            )
+            return activation_messages, bool(activation_messages)
+
+        if message.operation == "ping":
+            # ASSUMPTION: ping is treated as a poll for pending commands, so the
+            # response contains only command messages, if any.
+            return [], False
+
+        if message.operation == "check_access":
+            decision = self._handle_check_access(controller=controller, message=message)
+            return [
+                build_protocol_check_access_message(
+                    request_id=message.request_id,
+                    granted=decision.granted,
+                )
+            ], False
+
+        accepted_events = self._handle_events(controller=controller, message=message)
+        return [
+            build_protocol_events_message(
+                request_id=message.request_id,
+                events_success=accepted_events,
+            )
+        ], False
+
+    def _dispatch_legacy_message(
+        self,
+        *,
+        message: WebJsonMessage,
+        controller: Controller,
+    ) -> WebJsonResponse:
+        if not message.operation:
             return WebJsonResponse(
                 payload=build_success_response(
-                    operation=command.operation,
-                    request_id=command.request_id,
+                    operation="ack",
+                    request_id=message.request_id,
+                    result={"ack": "received"},
+                    commands=self._build_pending_legacy_commands(controller),
+                ),
+                http_status=200,
+            )
+
+        if message.operation not in SUPPORTED_REQUEST_OPERATIONS:
+            return WebJsonResponse(
+                payload=build_error_response(
+                    operation=message.operation or "unknown",
+                    request_id=message.request_id,
+                    error_code="unknown_operation",
+                    error_message="Operation is not supported by this endpoint.",
+                ),
+                http_status=200,
+            )
+
+        if message.operation == "power_on":
+            self._handle_power_on(controller=controller, message=message)
+            return WebJsonResponse(
+                payload=build_success_response(
+                    operation=message.operation,
+                    request_id=message.request_id,
                     result={"ack": "power_on_received", "controller_id": controller.id},
-                    commands=self._build_pending_commands(controller),
+                    commands=self._build_pending_legacy_commands(controller),
                 ),
                 http_status=200,
             )
 
-        if command.operation == "ping":
+        if message.operation == "ping":
             return WebJsonResponse(
                 payload=build_success_response(
-                    operation=command.operation,
-                    request_id=command.request_id,
+                    operation=message.operation,
+                    request_id=message.request_id,
                     result={"ack": "pong", "controller_id": controller.id},
-                    commands=self._build_pending_commands(controller),
+                    commands=self._build_pending_legacy_commands(controller),
                 ),
                 http_status=200,
             )
 
-        if command.operation == "check_access":
-            access_point = self._resolve_access_point(command=command, controller=controller)
-            if access_point is None:
-                self.event_logging_service.log_controller_event(
-                    controller=controller,
-                    message="Access point could not be resolved for access check.",
-                    reason_code="access_point_not_found",
-                    credential_uid=command.credential_uid or "",
-                    raw_payload=command.raw_payload,
-                )
-                decision = AccessDecision(
-                    granted=False,
-                    reason_code="access_point_not_found",
-                    reason_message="Access point could not be resolved for access check.",
-                    person_id=None,
-                    wristband_id=None,
-                )
-                return WebJsonResponse(
-                    payload=build_success_response(
-                        operation=command.operation,
-                        request_id=command.request_id,
-                        result=self._decision_to_result(decision),
-                        commands=self._build_pending_commands(controller),
-                    ),
-                    http_status=200,
-                )
-
-            decision = self.access_decision_service.decide(
-                uid=command.credential_uid or "",
-                access_point=access_point,
-            )
-            self.event_logging_service.log_access_decision(
-                decision=decision,
-                access_point=access_point,
-                credential_uid=command.credential_uid or "",
-                controller=controller,
-                raw_payload=command.raw_payload,
-            )
+        if message.operation == "check_access":
+            decision = self._handle_check_access(controller=controller, message=message)
             return WebJsonResponse(
                 payload=build_success_response(
-                    operation=command.operation,
-                    request_id=command.request_id,
+                    operation=message.operation,
+                    request_id=message.request_id,
                     result=self._decision_to_result(decision),
-                    commands=self._build_pending_commands(controller),
+                    commands=self._build_pending_legacy_commands(controller),
                 ),
                 http_status=200,
             )
 
-        accepted_events = 0
-        access_point_cache: dict[tuple[str | None, int | None], AccessPoint | None] = {}
-        for incoming_event in command.events:
-            cache_key = (incoming_event.access_point_code or command.access_point_code, incoming_event.device_port or command.device_port)
-            access_point = access_point_cache.get(cache_key)
-            if cache_key not in access_point_cache:
-                access_point = self._resolve_access_point(
-                    command=command,
-                    controller=controller,
-                    access_point_code=incoming_event.access_point_code,
-                    device_port=incoming_event.device_port,
-                )
-                access_point_cache[cache_key] = access_point
-
-            self._log_incoming_event(
-                controller=controller,
-                incoming_event=incoming_event,
-                access_point=access_point,
-            )
-            accepted_events += 1
-
+        accepted_events = self._handle_events(controller=controller, message=message)
         return WebJsonResponse(
             payload=build_success_response(
-                operation=command.operation,
-                request_id=command.request_id,
+                operation=message.operation,
+                request_id=message.request_id,
                 result={"accepted_events": accepted_events},
-                commands=self._build_pending_commands(controller),
+                commands=self._build_pending_legacy_commands(controller),
             ),
             http_status=200,
         )
 
-    def _resolve_controller(self, command: WebJsonCommand) -> Controller | None:
-        if not command.controller_serial_number:
+    def _handle_power_on(self, *, controller: Controller, message: WebJsonMessage) -> None:
+        self.event_logging_service.log_controller_event(
+            controller=controller,
+            message="Controller power_on received.",
+            reason_code="power_on",
+            raw_payload=message.raw_payload,
+        )
+
+    def _handle_check_access(
+        self,
+        *,
+        controller: Controller,
+        message: WebJsonMessage,
+    ) -> AccessDecision:
+        access_point = self._resolve_access_point(
+            controller=controller,
+            access_point_code=message.access_point_code,
+            device_port=message.device_port,
+        )
+        if access_point is None:
+            self.event_logging_service.log_controller_event(
+                controller=controller,
+                message="Access point could not be resolved for access check.",
+                reason_code="access_point_not_found",
+                credential_uid=message.credential_uid or "",
+                raw_payload=message.raw_payload,
+            )
+            return AccessDecision(
+                granted=False,
+                reason_code="access_point_not_found",
+                reason_message="Access point could not be resolved for access check.",
+                person_id=None,
+                wristband_id=None,
+            )
+
+        decision = self.access_decision_service.decide(
+            uid=message.credential_uid or "",
+            access_point=access_point,
+        )
+        self.event_logging_service.log_access_decision(
+            decision=decision,
+            access_point=access_point,
+            credential_uid=message.credential_uid or "",
+            controller=controller,
+            raw_payload=message.raw_payload,
+        )
+        return decision
+
+    def _handle_events(self, *, controller: Controller, message: WebJsonMessage) -> int:
+        accepted_events = 0
+        access_point_cache: dict[tuple[str | None, int | None], AccessPoint | None] = {}
+        for incoming_event in message.events:
+            cache_key = (incoming_event.access_point_code, incoming_event.device_port)
+            if cache_key not in access_point_cache:
+                access_point_cache[cache_key] = self._resolve_access_point(
+                    controller=controller,
+                    access_point_code=incoming_event.access_point_code,
+                    device_port=incoming_event.device_port,
+                )
+
+            self._log_incoming_event(
+                controller=controller,
+                incoming_event=incoming_event,
+                access_point=access_point_cache[cache_key],
+            )
+            accepted_events += 1
+
+        return accepted_events
+
+    def _resolve_controller(self, envelope: WebJsonEnvelope) -> Controller | None:
+        if not envelope.controller_serial_number:
             return None
-        return get_controller_by_serial_number(command.controller_serial_number)
+        return get_controller_by_serial_number(envelope.controller_serial_number)
 
     def _resolve_access_point(
         self,
         *,
-        command: WebJsonCommand,
         controller: Controller,
-        access_point_code: str | None = None,
-        device_port: int | None = None,
+        access_point_code: str | None,
+        device_port: int | None,
     ) -> AccessPoint | None:
-        effective_code = access_point_code or command.access_point_code
-        effective_port = device_port if device_port is not None else command.device_port
         return get_active_access_point_for_controller(
             controller_id=controller.id,
-            access_point_code=effective_code,
-            device_port=effective_port,
+            access_point_code=access_point_code,
+            device_port=device_port,
         )
 
-    def _build_pending_commands(self, controller: Controller) -> list[dict[str, Any]]:
+    def _build_pending_legacy_commands(self, controller: Controller) -> list[dict[str, Any]]:
         batch = self.controller_task_batch_service.dispatch_pending_batch(
             controller=controller,
             max_commands=settings.IRONLOGIC_TASK_BATCH_SIZE,
             max_payload_bytes=settings.IRONLOGIC_TASK_BATCH_MAX_BYTES,
         )
         return batch.commands
+
+    def _build_pending_protocol_messages(self, controller: Controller) -> list[dict[str, Any]]:
+        batch = self.controller_task_batch_service.dispatch_pending_batch(
+            controller=controller,
+            max_commands=settings.IRONLOGIC_TASK_BATCH_SIZE,
+            max_payload_bytes=settings.IRONLOGIC_TASK_BATCH_MAX_BYTES,
+        )
+        return build_protocol_controller_messages(list(batch.tasks))
+
+    def _build_power_on_activation_messages(
+        self,
+        *,
+        envelope: WebJsonEnvelope,
+        active: bool,
+        online: bool,
+    ) -> list[dict[str, Any]]:
+        if not settings.IRONLOGIC_AUTO_ACTIVATE_ON_POWER_ON:
+            return []
+
+        activation_messages: list[dict[str, Any]] = []
+        for message in envelope.messages:
+            if message.operation != "power_on":
+                continue
+            if message.active_state == 1 and active:
+                continue
+
+            activation_messages.append(
+                build_protocol_set_active_message(
+                    request_id=message.request_id,
+                    active=active,
+                    online=online and active,
+                )
+            )
+
+        return activation_messages
 
     def _log_incoming_event(
         self,
@@ -335,12 +504,16 @@ class IronLogicWebJsonService:
         self,
         *,
         controller: Controller,
-        command: WebJsonCommand,
+        acknowledgements: tuple[TaskAcknowledgement, ...],
     ) -> None:
         done_task_ids: list[int] = []
         failed_tasks: dict[int, str] = {}
 
-        for acknowledgement in command.task_acknowledgements:
+        for acknowledgement in acknowledgements:
+            self._log_task_acknowledgement_payload(
+                controller=controller,
+                acknowledgement=acknowledgement,
+            )
             self._accumulate_task_acknowledgement(
                 acknowledgement=acknowledgement,
                 done_task_ids=done_task_ids,
@@ -374,6 +547,27 @@ class IronLogicWebJsonService:
         if acknowledgement.status == "failed":
             failed_tasks[acknowledgement.task_id] = acknowledgement.error_message or "Controller reported task failure."
 
+    def _log_task_acknowledgement_payload(
+        self,
+        *,
+        controller: Controller,
+        acknowledgement: TaskAcknowledgement,
+    ) -> None:
+        raw_payload = acknowledgement.raw_payload
+        if not isinstance(raw_payload, dict):
+            return
+
+        cards = raw_payload.get("cards")
+        if not isinstance(cards, list):
+            return
+
+        self.event_logging_service.log_controller_event(
+            controller=controller,
+            message=f"Controller returned {len(cards)} cards from read_cards.",
+            reason_code="read_cards_result",
+            raw_payload=raw_payload,
+        )
+
     @staticmethod
     def _decision_to_result(decision: AccessDecision) -> dict[str, Any]:
         return {
@@ -384,16 +578,70 @@ class IronLogicWebJsonService:
             "wristband_id": decision.wristband_id,
         }
 
+    def _build_error_payload(
+        self,
+        *,
+        envelope: WebJsonEnvelope,
+        error_code: str,
+        error_message: str,
+    ) -> dict[str, Any]:
+        if not envelope.uses_message_envelope:
+            message = envelope.messages[0] if envelope.messages else self._build_empty_message()
+            return build_error_response(
+                operation=message.operation or "unknown",
+                request_id=message.request_id,
+                error_code=error_code,
+                error_message=error_message,
+            )
+
+        request_messages = [message for message in envelope.messages if message.operation]
+        if not request_messages:
+            protocol_messages = [
+                build_protocol_error_message(
+                    request_id=None,
+                    operation="unknown",
+                    error_code=error_code,
+                    error_message=error_message,
+                )
+            ]
+        else:
+            protocol_messages = [
+                build_protocol_error_message(
+                    request_id=message.request_id,
+                    operation=message.operation or "unknown",
+                    error_code=error_code,
+                    error_message=error_message,
+                )
+                for message in request_messages
+            ]
+
+        return build_protocol_envelope_response(
+            messages=protocol_messages,
+            interval_seconds=settings.IRONLOGIC_RESPONSE_INTERVAL_SECONDS,
+        )
+
     @staticmethod
     def _select_processing_status(
         *,
-        command: WebJsonCommand,
+        envelope: WebJsonEnvelope,
         response_payload: dict[str, Any],
     ) -> str:
+        if envelope.uses_message_envelope:
+            messages = response_payload.get("messages")
+            if isinstance(messages, list):
+                for message in messages:
+                    if not isinstance(message, dict):
+                        continue
+                    if message.get("operation") == "check_access" and message.get("granted") == 0:
+                        return WebJsonRequestLog.ProcessingStatus.ACCESS_DENIED
+                    if "error" in message or message.get("success") == 0:
+                        return WebJsonRequestLog.ProcessingStatus.ERROR
+            return WebJsonRequestLog.ProcessingStatus.PROCESSED
+
         if response_payload.get("status") == "error":
             return WebJsonRequestLog.ProcessingStatus.ERROR
 
-        if command.operation == "check_access":
+        if envelope.messages and envelope.messages[0].operation == "check_access":
             result = response_payload.get("result", {})
             if not result.get("granted", False):
                 return WebJsonRequestLog.ProcessingStatus.ACCESS_DENIED
@@ -405,6 +653,15 @@ class IronLogicWebJsonService:
         error_payload = response_payload.get("error")
         if isinstance(error_payload, dict):
             return str(error_payload.get("message") or "")
+
+        messages = response_payload.get("messages")
+        if isinstance(messages, list):
+            for message in messages:
+                if not isinstance(message, dict):
+                    continue
+                nested_error = message.get("error")
+                if isinstance(nested_error, dict):
+                    return str(nested_error.get("message") or "")
         return ""
 
     @staticmethod
@@ -414,6 +671,30 @@ class IronLogicWebJsonService:
         if value == "exit":
             return AccessEvent.Direction.EXIT
         return AccessEvent.Direction.UNKNOWN
+
+    @staticmethod
+    def _extract_request_id(envelope: WebJsonEnvelope) -> str:
+        for message in envelope.messages:
+            if message.request_id:
+                return message.request_id
+        return ""
+
+    @staticmethod
+    def _summarize_operations(envelope: WebJsonEnvelope) -> str:
+        operations: list[str] = []
+        for message in envelope.messages:
+            operation = message.operation or "ack"
+            if operation not in operations:
+                operations.append(operation)
+        if not operations:
+            return "empty"
+        if len(operations) == 1:
+            return operations[0]
+        return ",".join(operations)[:64]
+
+    @staticmethod
+    def _contains_power_on_request(envelope: WebJsonEnvelope) -> bool:
+        return any(message.operation == "power_on" for message in envelope.messages)
 
     @staticmethod
     def _create_request_log(
@@ -457,13 +738,39 @@ class IronLogicWebJsonService:
         request_log.http_status = http_status
         request_log.response_payload = response_payload
         request_log.error_message = error_message
-        request_log.save(update_fields=["processing_status", "http_status", "response_payload", "error_message", "updated_at"])
+        request_log.save(
+            update_fields=[
+                "processing_status",
+                "http_status",
+                "response_payload",
+                "error_message",
+                "updated_at",
+            ]
+        )
 
     @staticmethod
-    def _mark_controller_seen(controller: Controller) -> None:
-        updated_fields = {"last_seen_at": timezone.now()}
+    def _update_controller_runtime_state(
+        *,
+        controller: Controller,
+        envelope: WebJsonEnvelope,
+    ) -> None:
+        updated_fields: dict[str, Any] = {"last_seen_at": timezone.now()}
         if controller.status == Controller.Status.OFFLINE:
             updated_fields["status"] = Controller.Status.ACTIVE
+
+        for runtime_message in envelope.messages:
+            if runtime_message.controller_ip:
+                updated_fields["ip_address"] = runtime_message.controller_ip
+            if runtime_message.firmware_version:
+                updated_fields["firmware_version"] = runtime_message.firmware_version
+            if runtime_message.connection_firmware_version:
+                updated_fields["connection_firmware_version"] = runtime_message.connection_firmware_version
+            if runtime_message.active_state is not None:
+                updated_fields["active_state"] = runtime_message.active_state
+            if runtime_message.mode is not None:
+                updated_fields["mode_state"] = runtime_message.mode
+            if runtime_message.auth_hash:
+                updated_fields["last_auth_hash"] = runtime_message.auth_hash
 
         Controller.objects.filter(id=controller.id).update(**updated_fields)
 
@@ -472,7 +779,7 @@ class IronLogicWebJsonService:
         *,
         headers: Mapping[str, str],
         source_ip: str | None,
-        command: WebJsonCommand,
+        envelope: WebJsonEnvelope,
     ) -> str | None:
         configured_allowed_ips = {ip for ip in settings.IRONLOGIC_ALLOWED_IPS if ip}
         configured_token = settings.IRONLOGIC_WEBJSON_SHARED_TOKEN.strip()
@@ -482,7 +789,7 @@ class IronLogicWebJsonService:
                 return "Request IP is not allowed."
 
         if configured_token:
-            presented_token = self._extract_auth_token(headers=headers, command=command)
+            presented_token = self._extract_auth_token(headers=headers, envelope=envelope)
             if presented_token != configured_token:
                 return "Shared token validation failed."
 
@@ -496,7 +803,7 @@ class IronLogicWebJsonService:
         return remote_addr
 
     @staticmethod
-    def _extract_auth_token(*, headers: Mapping[str, str], command: WebJsonCommand) -> str | None:
+    def _extract_auth_token(*, headers: Mapping[str, str], envelope: WebJsonEnvelope) -> str | None:
         bearer_header = headers.get("Authorization", "")
         if bearer_header.lower().startswith("bearer "):
             return bearer_header.split(" ", 1)[1].strip()
@@ -506,7 +813,27 @@ class IronLogicWebJsonService:
             if token_value:
                 return token_value.strip()
 
-        return command.auth_token
+        return envelope.auth_token
+
+    @staticmethod
+    def _build_empty_message() -> WebJsonMessage:
+        return WebJsonMessage(
+            operation="",
+            request_id=None,
+            access_point_code=None,
+            device_port=None,
+            credential_uid=None,
+            auth_token=None,
+            auth_hash=None,
+            events=(),
+            task_acknowledgements=(),
+            firmware_version=None,
+            connection_firmware_version=None,
+            controller_ip=None,
+            active_state=None,
+            mode=None,
+            raw_payload={},
+        )
 
 
 def parse_raw_json_body(raw_body: str) -> dict[str, Any] | None:

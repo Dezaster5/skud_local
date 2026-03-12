@@ -29,6 +29,10 @@ class Controller(TimeStampedModel):
     )
     ip_address = models.GenericIPAddressField(null=True, blank=True)
     firmware_version = models.CharField(max_length=64, blank=True)
+    connection_firmware_version = models.CharField(max_length=64, blank=True)
+    active_state = models.PositiveSmallIntegerField(null=True, blank=True)
+    mode_state = models.PositiveSmallIntegerField(null=True, blank=True)
+    last_auth_hash = models.CharField(max_length=128, blank=True)
     description = models.TextField(blank=True)
     last_seen_at = models.DateTimeField(null=True, blank=True)
 
@@ -47,6 +51,7 @@ class ControllerTask(TimeStampedModel):
     class TaskType(models.TextChoices):
         SET_ACTIVE = "set_active", "Set active"
         OPEN_DOOR = "open_door", "Open door"
+        SET_DOOR_PARAMS = "set_door_params", "Set door params"
         ADD_WRISTBANDS = "add_wristbands", "Add wristbands"
         DEL_WRISTBANDS = "del_wristbands", "Delete wristbands"
         CLEAR_CARDS = "clear_cards", "Clear cards"

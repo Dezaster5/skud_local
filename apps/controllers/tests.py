@@ -41,6 +41,7 @@ class ControllerTaskServiceTests(TestCase):
         self.assertEqual(task.status, ControllerTask.Status.DONE)
         self.assertEqual(task.error_message, "")
         self.assertIsNotNone(task.completed_at)
+        self.assertGreaterEqual(task.updated_at, task.completed_at)
 
     def test_mark_tasks_as_failed_updates_status_and_error_message(self) -> None:
         task = self.task_service.enqueue_manual_open(controller=self.controller, duration_seconds=3)
@@ -128,6 +129,34 @@ class ControllerTaskServiceTests(TestCase):
             tasks[1].payload["protocol"]["cards"][0]["uid"],
             "04DELTA0001",
         )
+
+    def test_enqueue_set_door_params_creates_documented_protocol_payload(self) -> None:
+        task = self.task_service.enqueue_set_door_params(
+            controller=self.controller,
+            open_time=10,
+            open_control_time=20,
+            close_control_time=30,
+            requested_by="test-suite",
+        )
+
+        self.assertEqual(task.task_type, ControllerTask.TaskType.SET_DOOR_PARAMS)
+        self.assertEqual(
+            task.payload["protocol"],
+            {
+                "open": 10,
+                "open_control": 20,
+                "close_control": 30,
+            },
+        )
+
+    def test_enqueue_read_cards_creates_protocol_task(self) -> None:
+        task = self.task_service.enqueue_read_cards(
+            controller=self.controller,
+            requested_by="test-suite",
+        )
+
+        self.assertEqual(task.task_type, ControllerTask.TaskType.READ_CARDS)
+        self.assertEqual(task.payload["protocol"], {})
 
     @override_settings(IRONLOGIC_TASK_BATCH_SIZE=10, IRONLOGIC_TASK_BATCH_MAX_BYTES=150)
     def test_batch_service_respects_payload_limit_and_marks_tasks_sent(self) -> None:

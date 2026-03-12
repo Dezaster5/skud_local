@@ -8,6 +8,8 @@ from apps.controllers.serializers import (
     ControllerSerializer,
     ControllerTaskSerializer,
     ManualOpenDoorTaskSerializer,
+    ReadCardsTaskSerializer,
+    SetDoorParamsTaskSerializer,
     SyncWristbandsTaskSerializer,
 )
 from apps.controllers.services import ControllerSyncService, ControllerTaskService
@@ -25,6 +27,8 @@ class ControllerViewSet(viewsets.ModelViewSet):
     sync_service = ControllerSyncService(task_service=task_service)
     action_serializer_classes = {
         "open_door": ManualOpenDoorTaskSerializer,
+        "read_cards": ReadCardsTaskSerializer,
+        "set_door_params": SetDoorParamsTaskSerializer,
         "sync_wristbands": SyncWristbandsTaskSerializer,
     }
 
@@ -54,6 +58,33 @@ class ControllerViewSet(viewsets.ModelViewSet):
             controller=controller,
             access_point=serializer.validated_data.get("access_point"),
             duration_seconds=serializer.validated_data["duration_seconds"],
+            requested_by=request.user.get_username(),
+        )
+        return Response(ControllerTaskSerializer(task, context=self.get_serializer_context()).data, status=201)
+
+    @action(detail=True, methods=["post"], url_path="read-cards")
+    def read_cards(self, request: Request, pk: int | None = None) -> Response:
+        controller = self.get_object()
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        task = self.task_service.enqueue_read_cards(
+            controller=controller,
+            requested_by=request.user.get_username(),
+        )
+        return Response(ControllerTaskSerializer(task, context=self.get_serializer_context()).data, status=201)
+
+    @action(detail=True, methods=["post"], url_path="set-door-params")
+    def set_door_params(self, request: Request, pk: int | None = None) -> Response:
+        controller = self.get_object()
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        task = self.task_service.enqueue_set_door_params(
+            controller=controller,
+            open_time=serializer.validated_data["open"],
+            open_control_time=serializer.validated_data["open_control"],
+            close_control_time=serializer.validated_data["close_control"],
             requested_by=request.user.get_username(),
         )
         return Response(ControllerTaskSerializer(task, context=self.get_serializer_context()).data, status=201)

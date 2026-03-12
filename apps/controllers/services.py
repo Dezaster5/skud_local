@@ -75,6 +75,7 @@ class ControllerTaskService:
             status=ControllerTask.Status.SENT,
             sent_at=effective_sent_at,
             attempts=F("attempts") + 1,
+            updated_at=effective_sent_at,
         )
 
     def mark_tasks_as_done(
@@ -97,6 +98,7 @@ class ControllerTaskService:
             status=ControllerTask.Status.DONE,
             completed_at=effective_completed_at,
             error_message="",
+            updated_at=effective_completed_at,
         )
 
     def mark_tasks_as_failed(
@@ -121,6 +123,7 @@ class ControllerTaskService:
                 status=ControllerTask.Status.FAILED,
                 completed_at=effective_completed_at,
                 error_message=error_message[:2000],
+                updated_at=effective_completed_at,
             )
 
         return updated_count
@@ -140,6 +143,7 @@ class ControllerTaskService:
             return 0
 
         retry_deadline = timezone.now() - timedelta(seconds=effective_retry_after_seconds)
+        effective_updated_at = timezone.now()
         return ControllerTask.objects.filter(
             controller=controller,
             status=ControllerTask.Status.SENT,
@@ -149,6 +153,7 @@ class ControllerTaskService:
         ).update(
             status=ControllerTask.Status.PENDING,
             sent_at=None,
+            updated_at=effective_updated_at,
         )
 
     def enqueue_manual_open(
@@ -165,6 +170,9 @@ class ControllerTaskService:
         if access_point is not None:
             protocol_payload["access_point_id"] = access_point.id
             protocol_payload["access_point_code"] = access_point.code
+            protocol_payload["direction"] = (
+                1 if access_point.direction == AccessPoint.Direction.EXIT else 0
+            )
 
         payload = self._build_task_payload(
             protocol_payload=protocol_payload,
@@ -198,6 +206,49 @@ class ControllerTaskService:
             task_type=ControllerTask.TaskType.CLEAR_CARDS,
             payload=payload,
             priority=20,
+        )
+
+    def enqueue_read_cards(
+        self,
+        *,
+        controller: Controller,
+        requested_by: str = "",
+    ) -> ControllerTask:
+        payload = self._build_task_payload(
+            protocol_payload={},
+            source="controller_read_cards",
+            requested_by=requested_by,
+        )
+        return self.create_task(
+            controller=controller,
+            task_type=ControllerTask.TaskType.READ_CARDS,
+            payload=payload,
+            priority=35,
+        )
+
+    def enqueue_set_door_params(
+        self,
+        *,
+        controller: Controller,
+        open_time: int,
+        open_control_time: int,
+        close_control_time: int,
+        requested_by: str = "",
+    ) -> ControllerTask:
+        payload = self._build_task_payload(
+            protocol_payload={
+                "open": open_time,
+                "open_control": open_control_time,
+                "close_control": close_control_time,
+            },
+            source="controller_door_params_update",
+            requested_by=requested_by,
+        )
+        return self.create_task(
+            controller=controller,
+            task_type=ControllerTask.TaskType.SET_DOOR_PARAMS,
+            payload=payload,
+            priority=30,
         )
 
     def enqueue_set_mode(

@@ -19,12 +19,32 @@ class ControllerAdmin(admin.ModelAdmin):
         "controller_type",
         "status",
         "ip_address",
+        "firmware_version",
+        "connection_firmware_version",
+        "active_state",
+        "mode_state",
         "last_seen_at",
         "updated_at",
     )
     list_filter = ("controller_type", "status")
-    search_fields = ("name", "serial_number", "ip_address", "firmware_version")
-    readonly_fields = ("created_at", "updated_at", "last_seen_at")
+    search_fields = (
+        "name",
+        "serial_number",
+        "ip_address",
+        "firmware_version",
+        "connection_firmware_version",
+        "last_auth_hash",
+    )
+    readonly_fields = (
+        "created_at",
+        "updated_at",
+        "last_seen_at",
+        "firmware_version",
+        "connection_firmware_version",
+        "active_state",
+        "mode_state",
+        "last_auth_hash",
+    )
     inlines = (AccessPointInline,)
 
 
@@ -43,4 +63,3 @@ class ControllerTaskAdmin(admin.ModelAdmin):
     list_filter = ("task_type", "status")
     search_fields = ("controller__name", "controller__serial_number", "error_message")
     readonly_fields = ("created_at", "updated_at", "sent_at", "completed_at")
-
