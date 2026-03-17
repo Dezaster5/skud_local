@@ -48,6 +48,7 @@ INSTALLED_APPS = [
     "apps.access.apps.AccessConfig",
     "apps.controllers.apps.ControllersConfig",
     "apps.events.apps.EventsConfig",
+    "apps.fondvision_integration.apps.FondvisionIntegrationConfig",
     "apps.ironlogic_integration.apps.IronlogicIntegrationConfig",
 ]
 
