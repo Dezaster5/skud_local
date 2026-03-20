@@ -11,6 +11,13 @@ class FondvisionRequestLog(TimeStampedModel):
         null=True,
         blank=True,
     )
+    reader = models.ForeignKey(
+        "controllers.Reader",
+        on_delete=models.SET_NULL,
+        related_name="fondvision_request_logs",
+        null=True,
+        blank=True,
+    )
     wristband = models.ForeignKey(
         "wristbands.Wristband",
         on_delete=models.SET_NULL,
@@ -41,10 +48,11 @@ class FondvisionRequestLog(TimeStampedModel):
         ordering = ["-created_at", "-id"]
         indexes = [
             models.Index(fields=["controller", "created_at"], name="fondvision_ctrl_ts_idx"),
+            models.Index(fields=["reader", "created_at"], name="fondvision_reader_ts_idx"),
             models.Index(fields=["cjihao", "created_at"], name="fondvision_cjihao_ts_idx"),
         ]
 
     def __str__(self) -> str:
         identifier = self.cardid or "unknown-card"
-        device = self.cjihao or "unknown-device"
+        device = self.reader.name if self.reader else (self.cjihao or "unknown-device")
         return f"{device} -> {identifier}"

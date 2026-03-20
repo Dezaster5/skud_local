@@ -158,6 +158,20 @@ class ControllerTaskServiceTests(TestCase):
         self.assertEqual(task.task_type, ControllerTask.TaskType.READ_CARDS)
         self.assertEqual(task.payload["protocol"], {})
 
+    def test_enqueue_open_door_creates_direction_only_protocol_payload(self) -> None:
+        task = self.task_service.enqueue_open_door(
+            controller=self.controller,
+            direction=1,
+            requested_by="test-suite",
+            source="fondvision_qr_scan",
+            reader_id=7,
+        )
+
+        self.assertEqual(task.task_type, ControllerTask.TaskType.OPEN_DOOR)
+        self.assertEqual(task.payload["protocol"], {"direction": 1})
+        self.assertEqual(task.payload["meta"]["source"], "fondvision_qr_scan")
+        self.assertEqual(task.payload["meta"]["reader_id"], 7)
+
     @override_settings(IRONLOGIC_TASK_BATCH_SIZE=10, IRONLOGIC_TASK_BATCH_MAX_BYTES=150)
     def test_batch_service_respects_payload_limit_and_marks_tasks_sent(self) -> None:
         batch_service = ControllerTaskBatchService(task_service=self.task_service)

@@ -13,6 +13,7 @@ class PersonSerializer(serializers.ModelSerializer):
             "middle_name",
             "person_type",
             "status",
+            "presence_state",
             "email",
             "phone",
             "note",
@@ -29,4 +30,3 @@ class PersonSerializer(serializers.ModelSerializer):
         if valid_from and valid_until and valid_until < valid_from:
             raise serializers.ValidationError("valid_until must be greater than or equal to valid_from.")
         return attrs
-

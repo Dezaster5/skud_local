@@ -5,9 +5,25 @@ from apps.access.models import AccessPoint, AccessPolicy, TimeZoneRule
 
 @admin.register(AccessPoint)
 class AccessPointAdmin(admin.ModelAdmin):
-    list_display = ("code", "name", "controller", "direction", "status", "device_port", "updated_at")
+    list_display = (
+        "code",
+        "name",
+        "controller",
+        "direction",
+        "status",
+        "device_port",
+        "reader_ip_address",
+        "updated_at",
+    )
     list_filter = ("direction", "status", "controller")
-    search_fields = ("code", "name", "location", "controller__name", "controller__serial_number")
+    search_fields = (
+        "code",
+        "name",
+        "location",
+        "reader_ip_address",
+        "controller__name",
+        "controller__serial_number",
+    )
     readonly_fields = ("created_at", "updated_at")
 
 
@@ -40,4 +56,3 @@ class AccessPolicyAdmin(admin.ModelAdmin):
         "access_point__code",
     )
     readonly_fields = ("created_at", "updated_at")
-

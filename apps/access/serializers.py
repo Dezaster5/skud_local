@@ -18,6 +18,7 @@ class AccessPointSerializer(serializers.ModelSerializer):
             "direction",
             "status",
             "device_port",
+            "reader_ip_address",
             "location",
             "description",
             "created_at",

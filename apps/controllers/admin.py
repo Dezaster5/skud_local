@@ -1,13 +1,20 @@
 from django.contrib import admin
 
 from apps.access.models import AccessPoint
-from apps.controllers.models import Controller, ControllerTask
+from apps.controllers.models import Controller, ControllerTask, Reader
 
 
 class AccessPointInline(admin.TabularInline):
     model = AccessPoint
     extra = 0
     fields = ("code", "name", "direction", "status", "device_port")
+    show_change_link = True
+
+
+class ReaderInline(admin.TabularInline):
+    model = Reader
+    extra = 0
+    fields = ("name", "ip_address", "external_id", "device_number", "direction", "status")
     show_change_link = True
 
 
@@ -45,7 +52,24 @@ class ControllerAdmin(admin.ModelAdmin):
         "mode_state",
         "last_auth_hash",
     )
-    inlines = (AccessPointInline,)
+    inlines = (AccessPointInline, ReaderInline)
+
+
+@admin.register(Reader)
+class ReaderAdmin(admin.ModelAdmin):
+    list_display = (
+        "name",
+        "controller",
+        "ip_address",
+        "external_id",
+        "device_number",
+        "direction",
+        "status",
+        "updated_at",
+    )
+    list_filter = ("direction", "status", "controller__controller_type")
+    search_fields = ("name", "ip_address", "external_id", "controller__name", "controller__serial_number")
+    readonly_fields = ("created_at", "updated_at")
 
 
 @admin.register(ControllerTask)

@@ -186,6 +186,29 @@ class ControllerTaskService:
             priority=10,
         )
 
+    def enqueue_open_door(
+        self,
+        *,
+        controller: Controller,
+        direction: int,
+        requested_by: str = "",
+        source: str = "manual_open",
+        priority: int = 10,
+        **meta: Any,
+    ) -> ControllerTask:
+        payload = self._build_task_payload(
+            protocol_payload={"direction": 1 if int(direction) == 1 else 0},
+            source=source,
+            requested_by=requested_by,
+            **meta,
+        )
+        return self.create_task(
+            controller=controller,
+            task_type=ControllerTask.TaskType.OPEN_DOOR,
+            payload=payload,
+            priority=priority,
+        )
+
     def enqueue_clear_cards(
         self,
         *,

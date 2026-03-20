@@ -18,6 +18,7 @@ class WristbandSerializer(serializers.ModelSerializer):
             "uid",
             "person",
             "status",
+            "presence_state",
             "issued_at",
             "expires_at",
             "last_seen_at",
@@ -43,4 +44,3 @@ class WristbandAssignmentSerializer(serializers.Serializer):
 
 class WristbandActionSerializer(serializers.Serializer):
     pass
-

@@ -20,11 +20,11 @@ class PersonAdmin(admin.ModelAdmin):
         "middle_name",
         "person_type",
         "status",
+        "presence_state",
         "valid_until",
         "updated_at",
     )
-    list_filter = ("person_type", "status")
+    list_filter = ("person_type", "status", "presence_state")
     search_fields = ("last_name", "first_name", "middle_name", "email", "phone")
     readonly_fields = ("created_at", "updated_at")
     inlines = (WristbandInline,)
-

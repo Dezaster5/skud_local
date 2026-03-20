@@ -6,7 +6,7 @@ from itertools import count
 from django.conf import settings
 
 from apps.access.models import AccessPoint, AccessPolicy, TimeZoneRule
-from apps.controllers.models import Controller
+from apps.controllers.models import Controller, Reader
 from apps.people.models import Person
 from apps.wristbands.models import Wristband
 
@@ -15,6 +15,7 @@ _UNSET = object()
 _person_sequence = count(1)
 _wristband_sequence = count(1)
 _controller_sequence = count(1)
+_reader_sequence = count(1)
 _access_point_sequence = count(1)
 _timezone_sequence = count(1)
 _policy_sequence = count(1)
@@ -74,6 +75,25 @@ def create_access_point(*, controller=_UNSET, **overrides) -> AccessPoint:
 
     defaults.update(overrides)
     return AccessPoint.objects.create(**defaults)
+
+
+def create_reader(*, controller=_UNSET, **overrides) -> Reader:
+    sequence = next(_reader_sequence)
+    defaults = {
+        "name": f"Reader {sequence}",
+        "ip_address": f"172.18.200.{sequence}",
+        "external_id": f"READER-{sequence:03d}",
+        "device_number": sequence,
+        "direction": Reader.Direction.ENTRY,
+        "status": Reader.Status.ACTIVE,
+    }
+    if controller is _UNSET:
+        defaults["controller"] = create_controller()
+    else:
+        defaults["controller"] = controller
+
+    defaults.update(overrides)
+    return Reader.objects.create(**defaults)
 
 
 def create_timezone_rule(**overrides) -> TimeZoneRule:

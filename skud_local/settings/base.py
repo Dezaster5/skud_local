@@ -4,6 +4,30 @@ from pathlib import Path
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
 
 
+def load_env_file(path: Path) -> None:
+    if not path.exists():
+        return
+
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip()
+        if not key or key in os.environ:
+            continue
+
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+            value = value[1:-1]
+
+        os.environ[key] = value
+
+
+load_env_file(BASE_DIR / ".env")
+
+
 def get_env(name: str, default: str) -> str:
     return os.getenv(name, default)
 
@@ -155,6 +179,17 @@ IRONLOGIC_TASK_BATCH_SIZE = get_int_env("IRONLOGIC_TASK_BATCH_SIZE", 20)
 IRONLOGIC_TASK_BATCH_MAX_BYTES = get_int_env("IRONLOGIC_TASK_BATCH_MAX_BYTES", 16384)
 IRONLOGIC_TASK_SENT_RETRY_SECONDS = get_int_env("IRONLOGIC_TASK_SENT_RETRY_SECONDS", 120)
 IRONLOGIC_SYNC_WRISTBAND_CHUNK_SIZE = get_int_env("IRONLOGIC_SYNC_WRISTBAND_CHUNK_SIZE", 200)
+FONDVISION_CONTROLLER_USERNAME = get_env("FONDVISION_CONTROLLER_USERNAME", "z5rweb")
+FONDVISION_CONTROLLER_PASSWORD = get_env("FONDVISION_CONTROLLER_PASSWORD", "DD4DF9F2")
+FONDVISION_CONTROLLER_TIMEOUT_SECONDS = get_int_env("FONDVISION_CONTROLLER_TIMEOUT_SECONDS", 12)
+FONDVISION_COMMAND_RELAY_URL = get_env("FONDVISION_COMMAND_RELAY_URL", "")
+FONDVISION_COMMAND_RELAY_TOKEN = get_env("FONDVISION_COMMAND_RELAY_TOKEN", "")
+FONDVISION_COMMAND_RELAY_TIMEOUT_SECONDS = get_int_env("FONDVISION_COMMAND_RELAY_TIMEOUT_SECONDS", 15)
+FONDVISION_QR_PASSWORD = get_env(
+    "FONDVISION_QR_PASSWORD",
+    "om9HP1LSkx2BppF3vFz32nV2YI5D/B+moxFH/6/qer4=",
+)
+FONDVISION_QR_B_SUFFIX_REQUIRED_FROM = get_env("FONDVISION_QR_B_SUFFIX_REQUIRED_FROM", "2026-04-10")
 
 LOGGING = {
     "version": 1,

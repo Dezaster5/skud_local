@@ -35,6 +35,12 @@ class AccessPoint(TimeStampedModel):
         db_index=True,
     )
     device_port = models.PositiveSmallIntegerField(default=1)
+    reader_ip_address = models.GenericIPAddressField(
+        null=True,
+        blank=True,
+        unique=True,
+        help_text="IP address of the physical Fondvision/ER80 reader tied to this access point.",
+    )
     location = models.CharField(max_length=255, blank=True)
     description = models.TextField(blank=True)
 

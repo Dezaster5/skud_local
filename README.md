@@ -94,6 +94,14 @@ For local commands executed from the host machine, keep `POSTGRES_HOST=127.0.0.1
 docker compose up --build
 ```
 
+If you need the Django container to see the real source IP of LAN devices such as the Fondvision reader, start the web service with the host-network override instead of the default published-port setup:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.hostnet.yml up --build
+```
+
+This mode is intended for reader/controller integrations where Docker NAT would otherwise replace the sender IP with the Docker gateway address.
+
 3. Run migrations manually if needed:
 
 ```bash
@@ -160,7 +168,40 @@ IronLogic integration:
 - `IRONLOGIC_TASK_SENT_RETRY_SECONDS`
 - `IRONLOGIC_SYNC_WRISTBAND_CHUNK_SIZE`
 
+Fondvision integration:
+
+- `FONDVISION_CONTROLLER_USERNAME`
+- `FONDVISION_CONTROLLER_PASSWORD`
+- `FONDVISION_CONTROLLER_TIMEOUT_SECONDS`
+- `FONDVISION_COMMAND_RELAY_URL`
+- `FONDVISION_COMMAND_RELAY_TOKEN`
+- `FONDVISION_COMMAND_RELAY_TIMEOUT_SECONDS`
+- `FONDVISION_QR_PASSWORD`
+- `FONDVISION_QR_B_SUFFIX_REQUIRED_FROM`
+
 SQLite is intentionally not supported.
+
+## Docker Real-IP Mode
+
+The default `docker compose up` path publishes `8000:8000`, which is convenient for local development but can hide the real client IP behind Docker Desktop's network gateway. For hardware integrations that identify readers by source IP, use the host-network override:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.hostnet.yml up -d --build
+```
+
+Requirements:
+
+- Docker Desktop 4.34+
+- Docker Desktop setting `Enable host networking` turned on
+
+In this mode:
+
+- `web` runs with `network_mode: host`
+- incoming requests reach Gunicorn without the normal published-port NAT layer
+- `web` connects to PostgreSQL through the host-published database port on `127.0.0.1`
+
+Do not use the default `web` ports mapping and the host-network override at the same time.
+If Docker prints a warning that published ports are discarded in host network mode, that is expected.
 
 ## Migrations
 
@@ -204,6 +245,34 @@ Useful demo identifiers:
 - visitor wristband UID: `04DEMO000002`
 - blocked wristband UID: `04DEMO000003`
 - spare unassigned wristband UID: `04DEMO000004`
+
+## Fondvision Relay On Windows Host
+
+If Django runs in Docker Desktop and the container cannot route directly to the controller LAN, use the host relay:
+
+1. In `.env` set:
+
+```dotenv
+FONDVISION_COMMAND_RELAY_URL=http://host.docker.internal:8099/open-door
+FONDVISION_COMMAND_RELAY_TOKEN=change-me
+FONDVISION_CONTROLLER_USERNAME=z5rweb
+FONDVISION_CONTROLLER_PASSWORD=97679A55
+```
+
+2. Start the relay on the Windows host:
+
+```bash
+set FONDVISION_RELAY_TOKEN=change-me
+python scripts/fondvision_relay.py
+```
+
+3. Rebuild the web container:
+
+```bash
+docker compose up -d --build
+```
+
+The relay keeps the SKUD logic in Django while sending the final `cgi-bin/command` request from the Windows host, which can reach the LAN controller directly.
 
 ## Tests
 

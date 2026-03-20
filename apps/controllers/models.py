@@ -6,6 +6,7 @@ from apps.core.models import TimeStampedModel
 class Controller(TimeStampedModel):
     class ControllerType(models.TextChoices):
         IRONLOGIC_Z5R_WEB_BT = "ironlogic_z5r_web_bt", "IronLogic Z-5R Web BT"
+        FONDVISION_ER80 = "fondvision_er80", "Fondvision ER80"
         GENERIC_WEB_JSON = "generic_web_json", "Generic Web-JSON"
 
     class Status(models.TextChoices):
@@ -45,6 +46,65 @@ class Controller(TimeStampedModel):
 
     def __str__(self) -> str:
         return f"{self.name} ({self.serial_number})"
+
+
+class Reader(TimeStampedModel):
+    class Direction(models.TextChoices):
+        ENTRY = "entry", "Entry"
+        EXIT = "exit", "Exit"
+
+    class Status(models.TextChoices):
+        ACTIVE = "active", "Active"
+        INACTIVE = "inactive", "Inactive"
+        MAINTENANCE = "maintenance", "Maintenance"
+
+    controller = models.ForeignKey(
+        Controller,
+        on_delete=models.CASCADE,
+        related_name="readers",
+    )
+    name = models.CharField(max_length=128)
+    ip_address = models.GenericIPAddressField(unique=True)
+    external_id = models.CharField(
+        max_length=64,
+        blank=True,
+        db_index=True,
+        help_text="Reader identifier reported by Fondvision devices, for example cjihao.",
+    )
+    device_number = models.PositiveSmallIntegerField(
+        null=True,
+        blank=True,
+        db_index=True,
+        help_text="Optional numeric reader/channel identifier, for example mjihao.",
+    )
+    direction = models.CharField(
+        max_length=16,
+        choices=Direction.choices,
+        default=Direction.ENTRY,
+        db_index=True,
+    )
+    status = models.CharField(
+        max_length=16,
+        choices=Status.choices,
+        default=Status.ACTIVE,
+        db_index=True,
+    )
+    description = models.TextField(blank=True)
+
+    class Meta:
+        ordering = ["controller__name", "name", "id"]
+        indexes = [
+            models.Index(fields=["controller", "status"], name="reader_ctrl_status_idx"),
+            models.Index(fields=["external_id"], name="reader_external_id_idx"),
+            models.Index(fields=["controller", "device_number"], name="reader_ctrl_number_idx"),
+        ]
+
+    def save(self, *args, **kwargs):
+        self.external_id = self.external_id.strip().upper()
+        return super().save(*args, **kwargs)
+
+    def __str__(self) -> str:
+        return f"{self.name} ({self.ip_address})"
 
 
 class ControllerTask(TimeStampedModel):

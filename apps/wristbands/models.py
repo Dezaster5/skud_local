@@ -4,6 +4,11 @@ from apps.core.models import TimeStampedModel
 
 
 class Wristband(TimeStampedModel):
+    class PresenceState(models.TextChoices):
+        UNKNOWN = "unknown", "Unknown"
+        INSIDE = "inside", "Inside"
+        OUTSIDE = "outside", "Outside"
+
     class Status(models.TextChoices):
         ACTIVE = "active", "Active"
         BLOCKED = "blocked", "Blocked"
@@ -22,6 +27,12 @@ class Wristband(TimeStampedModel):
         max_length=32,
         choices=Status.choices,
         default=Status.ACTIVE,
+        db_index=True,
+    )
+    presence_state = models.CharField(
+        max_length=16,
+        choices=PresenceState.choices,
+        default=PresenceState.UNKNOWN,
         db_index=True,
     )
     issued_at = models.DateTimeField(null=True, blank=True)

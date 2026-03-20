@@ -5,6 +5,11 @@ from apps.core.models import TimeStampedModel
 
 
 class Person(TimeStampedModel):
+    class PresenceState(models.TextChoices):
+        UNKNOWN = "unknown", "Unknown"
+        INSIDE = "inside", "Inside"
+        OUTSIDE = "outside", "Outside"
+
     class PersonType(models.TextChoices):
         EMPLOYEE = "employee", "Employee"
         VISITOR = "visitor", "Visitor"
@@ -34,6 +39,12 @@ class Person(TimeStampedModel):
     email = models.EmailField(blank=True)
     phone = models.CharField(max_length=32, blank=True)
     note = models.TextField(blank=True)
+    presence_state = models.CharField(
+        max_length=16,
+        choices=PresenceState.choices,
+        default=PresenceState.UNKNOWN,
+        db_index=True,
+    )
     valid_from = models.DateTimeField(null=True, blank=True)
     valid_until = models.DateTimeField(null=True, blank=True)
 

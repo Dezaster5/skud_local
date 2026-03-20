@@ -1,0 +1,7 @@
+services:
+  web:
+    network_mode: host
+    ports: []
+    environment:
+      POSTGRES_HOST: 127.0.0.1
+      POSTGRES_PORT: ${POSTGRES_PORT_FORWARD:-5432}
